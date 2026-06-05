@@ -41,7 +41,6 @@ while cap.isOpened():
     cv2.imshow("Video Detection", annotated_frame)
 
     if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
-
+        
 cap.release()
 cv2.destroyAllWindows()
