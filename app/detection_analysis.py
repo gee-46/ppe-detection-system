@@ -19,3 +19,7 @@ for result in results:
         class_name = model.names[class_id]
 
         
+        print(
+            f"Object: {class_name} | "
+            f"Confidence: {confidence:.2f}"
+        )
