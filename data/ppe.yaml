@@ -1,0 +1,9 @@
+path: data/ppe_dataset
+
+train: images/train
+val: images/val
+
+names:
+  0: helmet
+  1: vest
+  2: person
