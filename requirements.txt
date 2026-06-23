@@ -1,0 +1,2 @@
+openCV 
+Python 3.11
