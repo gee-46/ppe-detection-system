@@ -10,4 +10,6 @@ results = model(
 )
 
 print("Detection completed successfully!")
-
+ {
+    
+ }
