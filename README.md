@@ -1,4 +1,4 @@
-<div align="center">
+
 
 <!-- Header Banner -->
 <img width="100%" src="https://capsule-render.vercel.app/api?type=slice&color=0:FF6B35,50:F7C948,100:00C9A7&height=200&section=header&text=PPE%20Detection%20System&fontSize=52&fontColor=ffffff&fontAlignY=38&desc=AI-Powered%20Workplace%20Safety%20Monitoring&descAlignY=60&descSize=18&animation=fadeIn"/>
