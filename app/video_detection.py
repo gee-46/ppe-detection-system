@@ -1,5 +1,6 @@
 import cv2
 import os
+import mediapipe
 import time
 from ultralytics import YOLO
 
