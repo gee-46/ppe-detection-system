@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PPE Detection System</title>
+<style>
+  :root {
+    --bg: #14181b;
+    --panel: #1c2226;
+    --panel-raised: #232a2f;
+    --line: #333d43;
+    --text: #e8ecee;
+    --text-dim: #8c979d;
+    --safety-yellow: #f5c518;
+    --safety-orange: #e8590c;
+    --ok: #2fb170;
+    --danger: #e3483a;
+    --mono: 'IBM Plex Mono', 'SF Mono', Consolas, monospace;
+    --sans: 'IBM Plex Sans', -apple-system, Segoe UI, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+  }
+
+  /* Hazard-stripe header bar: the signature element */
+  .hazard-bar {
+    height: 6px;
+    background: repeating-linear-gradient(
+      135deg,
+      var(--safety-yellow),
+      var(--safety-yellow) 14px,
+      #1a1a1a 14px,
+      #1a1a1a 28px
+    );
+  }
+
+  header {
+    padding: 28px 32px 20px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  header h1 {
+    margin: 0;
+    font-size: 22px;
+    letter-spacing: 0.02em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  header h1 .tag {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--bg);
+    background: var(--safety-yellow);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+  }
+
+  header p {
+    margin: 6px 0 0;
+    color: var(--text-dim);
+    font-size: 13px;
+    font-family: var(--mono);
+  }
+
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    border: 1px solid var(--line);
+    margin-top: 10px;
+  }
+  .status-pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim); }
+  .status-pill.ok .dot { background: var(--ok); }
+  .status-pill.warn .dot { background: var(--safety-orange); }
+  .status-pill.err .dot { background: var(--danger); }
+
+  main {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 32px;
+    display: grid;
+    grid-template-columns: 380px 1fr;
+    gap: 24px;
+  }
+
+  @media (max-width: 860px) {
+    main { grid-template-columns: 1fr; }
+  }
+
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 20px;
+  }
+
+  .panel h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin: 0 0 16px;
+  }
+
+  .dropzone {
+    border: 2px dashed var(--line);
+    border-radius: 6px;
+    padding: 32px 16px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .dropzone:hover, .dropzone.drag { border-color: var(--safety-yellow); background: var(--panel-raised); }
+  .dropzone svg { opacity: 0.5; margin-bottom: 8px; }
+  .dropzone .primary { font-size: 14px; }
+  .dropzone .secondary { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+  input[type=file] { display: none; }
+
+  .file-info {
+    margin-top: 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    word-break: break-all;
+  }
+
+  .mode-toggle {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+  }
+  .mode-toggle button {
+    flex: 1;
+    background: var(--panel-raised);
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    padding: 8px;
+    font-family: var(--mono);
+    font-size: 12px;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  .mode-toggle button.active {
+    color: var(--bg);
+    background: var(--safety-yellow);
+    border-color: var(--safety-yellow);
+    font-weight: 700;
+  }
+
+  button.run {
+    width: 100%;
+    margin-top: 16px;
+    padding: 12px;
+    background: var(--safety-orange);
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: filter 0.15s;
+  }
+  button.run:hover:not(:disabled) { filter: brightness(1.1); }
+  button.run:disabled { background: var(--line); color: var(--text-dim); cursor: not-allowed; }
+
+  .config-note {
+    margin-top: 14px;
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    line-height: 1.5;
+    border-top: 1px solid var(--line);
+    padding-top: 12px;
+  }
+
+  .results-empty {
+    color: var(--text-dim);
+    font-size: 14px;
+    text-align: center;
+    padding: 60px 20px;
+  }
+
+  .result-image {
+    width: 100%;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    display: block;
+    margin-bottom: 16px;
+  }
+
+  .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 4px;
+    letter-spacing: 0.03em;
+  }
+  .badge.compliant { background: rgba(47,177,112,0.15); color: var(--ok); border: 1px solid var(--ok); }
+  .badge.non_compliant { background: rgba(227,72,58,0.15); color: var(--danger); border: 1px solid var(--danger); }
+  .badge.not_configured { background: rgba(245,197,24,0.12); color: var(--safety-yellow); border: 1px solid var(--safety-yellow); }
+  .badge.no_person_detected { background: var(--panel-raised); color: var(--text-dim); border: 1px solid var(--line); }
+
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 13px;
+  }
+  .stat-row:last-child { border-bottom: none; }
+  .stat-row .k { color: var(--text-dim); }
+  .stat-row .v { font-family: var(--mono); }
+
+  table.detections {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 12px;
+    font-size: 13px;
+  }
+  table.detections th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  table.detections td {
+    padding: 7px 8px;
+    border-bottom: 1px solid var(--line);
+    font-family: var(--mono);
+  }
+  .conf-bar-wrap { display: flex; align-items: center; gap: 8px; }
+  .conf-bar { height: 5px; background: var(--line); border-radius: 3px; flex: 1; overflow: hidden; }
+  .conf-bar-fill { height: 100%; background: var(--safety-yellow); }
+
+  .violations-list {
+    margin-top: 12px;
+    list-style: none;
+    padding: 0;
+  }
+  .violations-list li {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--danger);
+    padding: 6px 10px;
+    background: rgba(227,72,58,0.08);
+    border-left: 2px solid var(--danger);
+    margin-bottom: 6px;
+    border-radius: 2px;
+  }
+
+  .warning-note {
+    font-size: 12px;
+    color: var(--safety-yellow);
+    background: rgba(245,197,24,0.08);
+    border: 1px solid rgba(245,197,24,0.3);
+    padding: 10px 12px;
+    border-radius: 4px;
+    margin-bottom: 16px;
+    line-height: 1.5;
+  }
+
+  .spinner {
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-top-color: #fff;
+    border-radius: 50%;
+    display: inline-block;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+    margin-right: 8px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="hazard-bar"></div>
+
+<header>
+  <h1>PPE Detection System <span class="tag">CV / YOLO</span></h1>
+  <p>Upload an image or video &rarr; object detection &rarr; PPE compliance analysis</p>
+  <div id="statusPill" class="status-pill"><span class="dot"></span><span id="statusText">checking backend…</span></div>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Input</h2>
+
+    <div class="mode-toggle">
+      <button id="modeImageBtn" class="active" onclick="setMode('image')">IMAGE</button>
+      <button id="modeVideoBtn" onclick="setMode('video')">VIDEO</button>
+    </div>
+
+    <div class="dropzone" id="dropzone" onclick="document.getElementById('fileInput').click()">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 16V4M12 4L7 9M12 4l5 5"/><path d="M4 16v3a2 2 0 002 2h12a2 2 0 002-2v-3"/></svg>
+      <div class="primary">Drop file or click to browse</div>
+      <div class="secondary" id="acceptText">.jpg .jpeg .png .bmp .webp</div>
+    </div>
+    <input type="file" id="fileInput" accept=".jpg,.jpeg,.png,.bmp,.webp" onchange="onFileChosen(this.files)">
+    <div class="file-info" id="fileInfo"></div>
+
+    <button class="run" id="runBtn" disabled onclick="runInference()">Run Detection</button>
+
+    <div class="config-note" id="configNote">Loading backend configuration…</div>
+  </section>
+
+  <section class="panel">
+    <h2>Results</h2>
+    <div id="results">
+      <div class="results-empty">No results yet. Upload a file and run detection.</div>
+    </div>
+  </section>
+</main>
+
+<script>
+const API_BASE = window.location.origin.includes('8000') || window.location.protocol === 'file:'
+  ? 'http://localhost:8000'
+  : window.location.origin;
+
+let mode = 'image';
+let selectedFile = null;
+
+function setMode(m) {
+  mode = m;
+  document.getElementById('modeImageBtn').classList.toggle('active', m === 'image');
+  document.getElementById('modeVideoBtn').classList.toggle('active', m === 'video');
+  const input = document.getElementById('fileInput');
+  input.accept = m === 'image' ? '.jpg,.jpeg,.png,.bmp,.webp' : '.mp4,.avi,.mov,.mkv';
+  document.getElementById('acceptText').textContent = m === 'image'
+    ? '.jpg .jpeg .png .bmp .webp'
+    : '.mp4 .avi .mov .mkv';
+  selectedFile = null;
+  document.getElementById('fileInfo').textContent = '';
+  document.getElementById('runBtn').disabled = true;
+}
+
+function onFileChosen(files) {
+  if (!files || !files.length) return;
+  selectedFile = files[0];
+  const kb = (selectedFile.size / 1024).toFixed(1);
+  document.getElementById('fileInfo').textContent = `${selectedFile.name} — ${kb} KB`;
+  document.getElementById('runBtn').disabled = false;
+}
+
+const dz = document.getElementById('dropzone');
+['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('drag'); }));
+dz.addEventListener('drop', e => onFileChosen(e.dataTransfer.files));
+
+async function checkHealth() {
+  const pill = document.getElementById('statusPill');
+  const text = document.getElementById('statusText');
+  try {
+    const res = await fetch(`${API_BASE}/health`);
+    const data = await res.json();
+    if (data.model_loaded) {
+      pill.className = 'status-pill ' + (data.is_custom_ppe_model ? 'ok' : 'warn');
+      text.textContent = data.is_custom_ppe_model
+        ? `PPE model loaded — ${data.classes.length} classes`
+        : `TEMPORARY model loaded (${data.classes.length} generic classes, not PPE-specific)`;
+    } else {
+      pill.className = 'status-pill err';
+      text.textContent = 'Backend reachable but model failed to load';
+    }
+    const note = document.getElementById('configNote');
+    note.innerHTML = `model: ${data.model_path.split('/').pop()}<br>`
+      + `person class(es): ${data.person_class_names.join(', ') || '—'}<br>`
+      + `required PPE: ${data.required_ppe_classes.join(', ') || '(none configured yet)'}`;
+  } catch (e) {
+    pill.className = 'status-pill err';
+    text.textContent = `Cannot reach backend at ${API_BASE}`;
+    document.getElementById('configNote').textContent = 'Start the API: uvicorn app.api.main:app';
+  }
+}
+checkHealth();
+
+async function runInference() {
+  if (!selectedFile) return;
+  const btn = document.getElementById('runBtn');
+  const results = document.getElementById('results');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span>Running…';
+  results.innerHTML = '<div class="results-empty">Processing…</div>';
+
+  const formData = new FormData();
+  formData.append('file', selectedFile);
+  const endpoint = mode === 'image' ? '/predict/image' : '/predict/video';
+
+  try {
+    const res = await fetch(`${API_BASE}${endpoint}`, { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) {
+      results.innerHTML = `<div class="warning-note">Error ${res.status}: ${data.detail || 'request failed'}</div>`;
+      return;
+    }
+    mode === 'image' ? renderImageResult(data) : renderVideoResult(data);
+  } catch (e) {
+    results.innerHTML = `<div class="warning-note">Request failed: ${e.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Run Detection';
+  }
+}
+
+function complianceBadge(status) {
+  const labels = {
+    compliant: 'COMPLIANT',
+    non_compliant: 'VIOLATION',
+    no_person_detected: 'NO PERSON DETECTED',
+    not_configured: 'PPE CLASSES NOT CONFIGURED'
+  };
+  return `<span class="badge ${status}">${labels[status] || status}</span>`;
+}
+
+function renderImageResult(data) {
+  const results = document.getElementById('results');
+  let html = '';
+
+  if (!data.is_custom_ppe_model) {
+    html += `<div class="warning-note">⚠ Running on the TEMPORARY generic model. Detections below are general objects (COCO classes), not PPE-specific — the compliance section will read "PPE classes not configured" until the trained model is deployed.</div>`;
+  }
+
+  if (data.annotated_image_url) {
+    html += `<img class="result-image" src="${API_BASE}${data.annotated_image_url}" alt="annotated result">`;
+  }
+
+  html += `<div style="margin-bottom:16px">${complianceBadge(data.compliance.overall_status)}</div>`;
+
+  html += `<div class="stat-row"><span class="k">Detections</span><span class="v">${data.detections.length}</span></div>`;
+  html += `<div class="stat-row"><span class="k">Persons detected</span><span class="v">${data.compliance.persons_detected}</span></div>`;
+  html += `<div class="stat-row"><span class="k">Inference time</span><span class="v">${data.inference_time_ms} ms</span></div>`;
+
+  if (data.compliance.violations.length) {
+    html += '<ul class="violations-list">' + data.compliance.violations.map(v => `<li>${v}</li>`).join('') + '</ul>';
+  }
+
+  if (data.detections.length) {
+    html += `<table class="detections"><thead><tr><th>Class</th><th>Confidence</th></tr></thead><tbody>`;
+    data.detections
+      .sort((a, b) => b.confidence - a.confidence)
+      .forEach(d => {
+        const pct = Math.round(d.confidence * 100);
+        html += `<tr><td>${d.class_name}</td><td><div class="conf-bar-wrap"><div class="conf-bar"><div class="conf-bar-fill" style="width:${pct}%"></div></div><span>${pct}%</span></div></td></tr>`;
+      });
+    html += `</tbody></table>`;
+  }
+
+  results.innerHTML = html;
+}
+
+function renderVideoResult(data) {
+  const results = document.getElementById('results');
+  let html = '';
+
+  if (!data.is_custom_ppe_model) {
+    html += `<div class="warning-note">⚠ Running on the TEMPORARY generic model — detections are general objects, not PPE-specific.</div>`;
+  }
+
+  html += `<div style="margin-bottom:16px">${complianceBadge(data.overall_compliance_status)}</div>`;
+  html += `<div class="stat-row"><span class="k">Frames total</span><span class="v">${data.frames_total}</span></div>`;
+  html += `<div class="stat-row"><span class="k">Frames analyzed (sampled)</span><span class="v">${data.frames_analyzed}</span></div>`;
+  html += `<div class="stat-row"><span class="k">Violation frames</span><span class="v">${data.violation_frame_count}</span></div>`;
+  html += `<div class="stat-row"><span class="k">Processing time</span><span class="v">${data.processing_time_ms} ms</span></div>`;
+
+  const classes = Object.entries(data.detections_by_class || {});
+  if (classes.length) {
+    html += `<table class="detections"><thead><tr><th>Class</th><th>Count (sampled frames)</th></tr></thead><tbody>`;
+    classes.sort((a, b) => b[1] - a[1]).forEach(([name, count]) => {
+      html += `<tr><td>${name}</td><td>${count}</td></tr>`;
+    });
+    html += `</tbody></table>`;
+  }
+
+  if (!data.annotated_video_url) {
+    html += `<div class="config-note" style="margin-top:16px">Note: annotated video re-encoding is not implemented yet — this endpoint returns aggregate stats from sampled frames rather than a downloadable annotated video. See README limitations.</div>`;
+  }
+
+  results.innerHTML = html;
+}
+</script>
+
+</body>
+</html>

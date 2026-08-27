@@ -1,0 +1,72 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+
+# --- Environment / secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+kaggle.json
+
+# --- Dataset (too large / must be obtained separately, see README) ---
+data/ppe_dataset/images/
+data/ppe_dataset/labels/
+data/ppe_dataset/**/*.jpg
+data/ppe_dataset/**/*.jpeg
+data/ppe_dataset/**/*.png
+data/ppe_dataset/**/*.txt
+!data/ppe_dataset/images/train/.gitkeep
+!data/ppe_dataset/images/val/.gitkeep
+!data/ppe_dataset/labels/train/.gitkeep
+!data/ppe_dataset/labels/val/.gitkeep
+*.zip
+*.tar
+*.tar.gz
+
+# --- Trained model artifacts (keep out of git; large binary files) ---
+models/trained/*.pt
+!models/trained/.gitkeep
+runs/
+
+# NOTE: yolov8n.pt (the small pretrained base model, ~6MB) is intentionally
+# NOT ignored — it's small enough to version and is required as the
+# starting checkpoint for training / the temporary fallback model.
+
+# --- Outputs (generated at runtime) ---
+outputs/*
+!outputs/.gitkeep
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# --- Docker ---
+*.log
+# --- Local test media ---
+data/*.mp4
+data/*.jpg
+data/output/
+
+# --- Backup files ---
+*.backup
+
+# --- Trained / pretrained model artifacts ---
+models/trained/*.pt
+models/*.pt
+*.pt
+!models/trained/.gitkeep

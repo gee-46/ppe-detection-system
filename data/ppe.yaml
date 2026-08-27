@@ -1,9 +1,23 @@
-path: data/ppe_dataset
+path: C:/Users/Dell/.cache/kagglehub/datasets/shlokraval/ppe-dataset-yolov8/versions/1
 
-train: images/train
-val: images/val
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 14
 
 names:
-  0: helmet
-  1: vest
-  2: person
+  0: Fall-Detected
+  1: Gloves
+  2: Goggles
+  3: Hardhat
+  4: Ladder
+  5: Mask
+  6: NO-Gloves
+  7: NO-Goggles
+  8: NO-Hardhat
+  9: NO-Mask
+  10: NO-Safety Vest
+  11: Person
+  12: Safety Cone
+  13: Safety Vest

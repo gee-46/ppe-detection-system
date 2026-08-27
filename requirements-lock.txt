@@ -1,0 +1,16 @@
+# Exact versions this project was built and tested against
+# (Python 3.12, Linux, CPU-only). Generated via `pip freeze`.
+# Use requirements.txt for normal installs; use this file only if you need
+# to reproduce the exact tested environment.
+fastapi==0.141.1
+numpy==2.5.2
+opencv-python-headless==5.0.0.93
+pydantic==2.13.4
+python-multipart==0.0.32
+PyYAML==6.0.3
+torch==2.13.0
+torchvision==0.28.0
+ultralytics==8.4.120
+uvicorn==0.52.3
+pytest==9.1.1
+httpx==0.28.1
