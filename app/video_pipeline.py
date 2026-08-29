@@ -1,74 +1,77 @@
 """
 End-to-end PPE video processing pipeline.
 
-Pipeline:
+Architecture:
 
     Video
-      ↓
-    YOLO + ByteTrack
-      ↓
-    Person tracking + YOLO detections
-      ↓
-    Track-aware PPE compliance
-      ↓
-    Annotated output video
+      |
+      +------------------------+
+      |                        |
+      v                        v
+  YOLOv8n COCO          Custom PPE YOLO
+      |                 on person crops
+      v                        |
+  ByteTrack                    |
+      |                        |
+      v                        v
+ Person IDs              PPE detections
+      |                        |
+      +-----------+------------+
+                  |
+                  v
+        Track-aware compliance
+                  |
+                  v
+        Clean annotated video
 
-The tracker performs the YOLO inference and returns both:
-    - tracked people
-    - all detections
+The PersonTracker is responsible for:
 
-This avoids running a second model.predict() call for the same frame.
+    YOLOv8n person detection
+    ByteTrack tracking
+    person-crop PPE detection
+    duplicate PPE suppression
 
-This module is intentionally separate from FastAPI so the same
-processing engine can later be reused for:
+This pipeline is responsible for:
 
-    - webcam
-    - RTSP/CCTV
-    - multiple cameras
+    compliance
+    statistics
+    clean visualization
+    output video
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+from collections import defaultdict
 
 import cv2
+from ultralytics import YOLO
 
 
-# ---------------------------------------------------------------------------
-# Project path
-# ---------------------------------------------------------------------------
+# ============================================================================
+# PROJECT PATH
+# ============================================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Allow:
-#
-#     python app/video_pipeline.py
-#
-# in addition to:
-#
-#     python -m app.video_pipeline
-#
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-from app.model_service import Detection, get_model_service
+from app.model_service import get_model_service
 from app.tracker import PersonTracker
-from app.tracked_compliance import (
-    TrackCompliance,
-    TrackComplianceManager,
-)
+from app.tracked_compliance import TrackComplianceManager
 
 
-# ---------------------------------------------------------------------------
-# Default configuration
-# ---------------------------------------------------------------------------
+# ============================================================================
+# DEFAULT PATHS
+# ============================================================================
 
 DEFAULT_INPUT = (
     PROJECT_ROOT
     / "data"
-    / "person_test.mp4"
+    / "multi_person_test.mp4"
 )
 
 DEFAULT_OUTPUT = (
@@ -78,27 +81,92 @@ DEFAULT_OUTPUT = (
     / "ppe_result.mp4"
 )
 
+PERSON_MODEL_PATH = (
+    PROJECT_ROOT
+    / "models"
+    / "yolov8n.pt"
+)
 
-# ---------------------------------------------------------------------------
-# Drawing helpers
-# ---------------------------------------------------------------------------
+
+# ============================================================================
+# VISUALIZATION
+# ============================================================================
+
+def _draw_text_box(
+    frame,
+    text,
+    x,
+    y,
+    width,
+    height=28,
+):
+    """
+    Draw a black background behind text and then draw white text.
+
+    Coordinates are clipped to the video frame.
+    """
+
+    frame_height, frame_width = frame.shape[:2]
+
+    x = max(0, min(int(x), frame_width - 1))
+    y = max(height, min(int(y), frame_height))
+
+    width = min(
+        width,
+        frame_width - x,
+    )
+
+    top = max(
+        0,
+        y - height,
+    )
+
+    cv2.rectangle(
+        frame,
+        (x, top),
+        (x + width, y),
+        (0, 0, 0),
+        -1,
+    )
+
+    cv2.putText(
+        frame,
+        text,
+        (x + 6, y - 8),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.52,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
 
 def _draw_person(
     frame,
     person,
-    compliance: TrackCompliance | None,
+    compliance,
 ):
     """
-    Draw a tracked person and their PPE compliance status.
+    Draw one tracked person.
+
+    The annotation is intentionally compact so multiple people
+    do not overwrite each other's information.
     """
 
     x1, y1, x2, y2 = [
-        int(value)
-        for value in person.box_xyxy
+        int(v)
+        for v in person.box_xyxy
     ]
 
+    frame_height, frame_width = frame.shape[:2]
+
+    x1 = max(0, min(x1, frame_width - 1))
+    y1 = max(0, min(y1, frame_height - 1))
+    x2 = max(0, min(x2, frame_width - 1))
+    y2 = max(0, min(y2, frame_height - 1))
+
     # ------------------------------------------------------------------
-    # Determine status
+    # Status
     # ------------------------------------------------------------------
 
     if compliance is None:
@@ -109,7 +177,7 @@ def _draw_person(
         status = "NON-COMPLIANT"
 
     # ------------------------------------------------------------------
-    # Person bounding box
+    # Person box
     # ------------------------------------------------------------------
 
     cv2.rectangle(
@@ -124,94 +192,178 @@ def _draw_person(
     # Header
     # ------------------------------------------------------------------
 
-    label = (
-        f"ID {person.track_id} | "
-        f"{status}"
+    header = (
+        f"ID {person.track_id} | {status}"
     )
 
-    cv2.rectangle(
+    # Keep header inside the frame.
+    header_width = 235
+
+    header_x = x1
+
+    if header_x + header_width > frame_width:
+        header_x = max(
+            0,
+            frame_width - header_width,
+        )
+
+    header_y = max(
+        32,
+        y1,
+    )
+
+    _draw_text_box(
         frame,
-        (x1, max(0, y1 - 30)),
-        (x1 + 250, y1),
-        (0, 0, 0),
-        -1,
+        header,
+        header_x,
+        header_y,
+        header_width,
+        30,
     )
-
-    cv2.putText(
-        frame,
-        label,
-        (x1 + 5, max(20, y1 - 8)),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
-        (255, 255, 255),
-        2,
-    )
-
-    # ------------------------------------------------------------------
-    # PPE information
-    # ------------------------------------------------------------------
 
     if compliance is None:
         return
 
-    y = y2 + 20
+    # ------------------------------------------------------------------
+    # Compact PPE summary
+    # ------------------------------------------------------------------
 
-    if compliance.present_ppe:
+    present = list(
+        compliance.present_ppe
+    )
 
-        text = (
+    missing = list(
+        compliance.missing_ppe
+    )
+
+    if present:
+        ppe_text = (
             "PPE: "
-            + ", ".join(
-                compliance.present_ppe
-            )
+            + ", ".join(present)
         )
+    else:
+        ppe_text = "PPE: None"
 
-        cv2.putText(
-            frame,
-            text,
-            (x1, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (255, 255, 255),
-            1,
-        )
-
-        y += 18
-
-    if compliance.missing_ppe:
-
-        text = (
+    # Only show missing PPE if there is room.
+    if missing:
+        missing_text = (
             "Missing: "
-            + ", ".join(
-                compliance.missing_ppe
+            + ", ".join(missing)
+        )
+    else:
+        missing_text = "Missing: None"
+
+    # ------------------------------------------------------------------
+    # Draw summary ABOVE or BELOW person depending on available space.
+    # ------------------------------------------------------------------
+
+    line_height = 20
+
+    required_height = (
+        line_height * 2
+        + 8
+    )
+
+    if (
+        y2 + required_height
+        < frame_height
+    ):
+        text_x = x1
+
+        if text_x + 300 > frame_width:
+            text_x = max(
+                0,
+                frame_width - 300,
             )
+
+        text_y = y2 + 20
+
+        cv2.putText(
+            frame,
+            ppe_text,
+            (text_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
         )
 
         cv2.putText(
             frame,
-            text,
-            (x1, y),
+            missing_text,
+            (text_x, text_y + line_height),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
+            0.42,
             (255, 255, 255),
             1,
+            cv2.LINE_AA,
+        )
+
+    else:
+        # If the person reaches the bottom of the image,
+        # put the summary near the top of their box.
+        text_x = x1
+
+        if text_x + 300 > frame_width:
+            text_x = max(
+                0,
+                frame_width - 300,
+            )
+
+        text_y = max(
+            55,
+            y1 + 55,
+        )
+
+        cv2.putText(
+            frame,
+            ppe_text,
+            (text_x, text_y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+        cv2.putText(
+            frame,
+            missing_text,
+            (text_x, text_y + line_height),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
         )
 
 
 def _draw_ppe_detection(
     frame,
-    detection: Detection,
+    detection,
 ):
     """
-    Draw a PPE detection that is not a Person.
+    Draw one PPE detection.
+
+    Person detections and irrelevant classes have already been
+    filtered by PersonTracker.
     """
 
     if not detection.box_xyxy:
         return
 
     x1, y1, x2, y2 = [
-        int(value)
-        for value in detection.box_xyxy
+        int(v)
+        for v in detection.box_xyxy
     ]
+
+    frame_height, frame_width = frame.shape[:2]
+
+    x1 = max(0, min(x1, frame_width - 1))
+    y1 = max(0, min(y1, frame_height - 1))
+    x2 = max(0, min(x2, frame_width - 1))
+    y2 = max(0, min(y2, frame_height - 1))
 
     label = (
         f"{detection.class_name} "
@@ -229,37 +381,87 @@ def _draw_ppe_detection(
     cv2.putText(
         frame,
         label,
-        (x1, max(15, y1 - 5)),
+        (
+            x1,
+            max(
+                15,
+                y1 - 5,
+            ),
+        ),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.4,
+        0.38,
         (255, 255, 255),
         1,
+        cv2.LINE_AA,
     )
 
 
-# ---------------------------------------------------------------------------
-# Main pipeline
-# ---------------------------------------------------------------------------
+def _draw_frame_info(
+    frame,
+    frame_number,
+    total_frames,
+    people_count,
+):
+    """
+    Draw global frame information.
+    """
+
+    text = (
+        f"Frame {frame_number}/{total_frames}"
+        f" | People: {people_count}"
+    )
+
+    cv2.rectangle(
+        frame,
+        (0, 0),
+        (290, 38),
+        (0, 0, 0),
+        -1,
+    )
+
+    cv2.putText(
+        frame,
+        text,
+        (10, 25),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+
+# ============================================================================
+# VIDEO PROCESSING
+# ============================================================================
 
 def process_video(
     input_path: str | Path,
     output_path: str | Path,
-    confidence_threshold: float = 0.10,
+    confidence_threshold: float = 0.20,
     imgsz: int = 640,
 ) -> dict:
     """
-    Process a complete video through the PPE pipeline.
+    Process an entire video.
 
-    The pipeline performs one YOLO + ByteTrack call per frame.
+    Person detection:
+        YOLOv8n COCO
 
-    Returns processing statistics.
+    Tracking:
+        ByteTrack
+
+    PPE:
+        Custom PPE model on individual person crops
+
+    Compliance:
+        TrackComplianceManager
     """
 
     input_path = Path(input_path)
     output_path = Path(output_path)
 
     # ------------------------------------------------------------------
-    # Validate input
+    # Validate
     # ------------------------------------------------------------------
 
     if not input_path.exists():
@@ -281,30 +483,63 @@ def process_video(
     print()
 
     # ------------------------------------------------------------------
-    # Load model
+    # PPE model
     # ------------------------------------------------------------------
 
-    print("Loading YOLO model...")
+    print("Loading PPE model...")
 
-    model = get_model_service()
+    ppe_model = get_model_service()
 
     print(
-        f"Model : {model.model_path}"
+        f"PPE Model    : "
+        f"{ppe_model.model_path}"
     )
 
     # ------------------------------------------------------------------
-    # Create tracker
+    # Person model
+    # ------------------------------------------------------------------
+
+    print("Loading Person model...")
+
+    if not PERSON_MODEL_PATH.exists():
+        raise FileNotFoundError(
+            f"Person model not found:\n"
+            f"{PERSON_MODEL_PATH}"
+        )
+
+    person_model = YOLO(
+        str(PERSON_MODEL_PATH)
+    )
+
+    print(
+        f"Person Model : "
+        f"{PERSON_MODEL_PATH}"
+    )
+
+    # ------------------------------------------------------------------
+    # Tracker
     # ------------------------------------------------------------------
 
     tracker = PersonTracker(
-        model=model,
+        model=ppe_model,
+        person_model=person_model,
         confidence_threshold=confidence_threshold,
+        ppe_confidence_threshold=0.01,
+        crop_padding=0.15,
     )
 
-    print("Tracker: ByteTrack")
+    print(
+        "Tracker      : "
+        "YOLOv8n Person + ByteTrack"
+    )
+
+    print(
+        "PPE strategy : "
+        "Per-person crop inference"
+    )
 
     # ------------------------------------------------------------------
-    # Create compliance manager
+    # Compliance
     # ------------------------------------------------------------------
 
     compliance_manager = (
@@ -312,7 +547,7 @@ def process_video(
     )
 
     # ------------------------------------------------------------------
-    # Open input video
+    # Open video
     # ------------------------------------------------------------------
 
     capture = cv2.VideoCapture(
@@ -321,7 +556,7 @@ def process_video(
 
     if not capture.isOpened():
         raise RuntimeError(
-            f"Could not open input video:\n"
+            f"Could not open video:\n"
             f"{input_path}"
         )
 
@@ -355,14 +590,17 @@ def process_video(
         f"Resolution    : "
         f"{width}x{height}"
     )
+
     print(
         f"FPS           : "
         f"{fps:.2f}"
     )
+
     print(
         f"Total frames  : "
         f"{total_frames}"
     )
+
     print()
     print("Processing...")
     print("-" * 70)
@@ -398,11 +636,22 @@ def process_video(
     unique_track_ids = set()
 
     compliant_frames = 0
-
     non_compliant_frames = 0
 
+    track_stats = defaultdict(
+        lambda: {
+            "frames_seen": 0,
+            "compliant_frames": 0,
+            "non_compliant_frames": 0,
+            "ppe_observations": defaultdict(int),
+            "missing_observations": defaultdict(int),
+            "violations": defaultdict(int),
+            "confidence_sum": 0.0,
+        }
+    )
+
     # ------------------------------------------------------------------
-    # Frame loop
+    # Main loop
     # ------------------------------------------------------------------
 
     while True:
@@ -415,7 +664,7 @@ def process_video(
         frame_count += 1
 
         # --------------------------------------------------------------
-        # ONE YOLO + ByteTrack inference
+        # TRACK + PPE
         # --------------------------------------------------------------
 
         tracking_result = tracker.update(
@@ -431,11 +680,8 @@ def process_video(
         )
 
         # --------------------------------------------------------------
-        # Track statistics
+        # IDs
         # --------------------------------------------------------------
-
-        if tracked_people:
-            frames_with_people += 1
 
         current_ids = {
             person.track_id
@@ -446,8 +692,11 @@ def process_video(
             current_ids
         )
 
+        if tracked_people:
+            frames_with_people += 1
+
         # --------------------------------------------------------------
-        # Track-aware PPE compliance
+        # COMPLIANCE
         # --------------------------------------------------------------
 
         compliance_results = (
@@ -463,7 +712,7 @@ def process_video(
         }
 
         # --------------------------------------------------------------
-        # Frame compliance statistics
+        # FRAME STATISTICS
         # --------------------------------------------------------------
 
         if any(
@@ -479,16 +728,52 @@ def process_video(
             non_compliant_frames += 1
 
         # --------------------------------------------------------------
-        # Draw PPE detections
+        # TRACK STATISTICS
+        # --------------------------------------------------------------
+
+        for result in compliance_results:
+
+            track_id = result.track_id
+
+            stats = track_stats[
+                track_id
+            ]
+
+            stats["frames_seen"] += 1
+
+            stats["confidence_sum"] += (
+                result.person_confidence
+            )
+
+            if result.compliant:
+                stats[
+                    "compliant_frames"
+                ] += 1
+            else:
+                stats[
+                    "non_compliant_frames"
+                ] += 1
+
+            for ppe in result.present_ppe:
+                stats[
+                    "ppe_observations"
+                ][ppe] += 1
+
+            for ppe in result.missing_ppe:
+                stats[
+                    "missing_observations"
+                ][ppe] += 1
+
+            for violation in result.violations:
+                stats[
+                    "violations"
+                ][violation] += 1
+
+        # --------------------------------------------------------------
+        # DRAW PPE
         # --------------------------------------------------------------
 
         for detection in detections:
-
-            if detection.class_name in {
-                "Person",
-                "person",
-            }:
-                continue
 
             _draw_ppe_detection(
                 frame,
@@ -496,7 +781,9 @@ def process_video(
             )
 
         # --------------------------------------------------------------
-        # Draw tracked people
+        # DRAW PEOPLE
+        #
+        # Draw larger person boxes AFTER PPE boxes.
         # --------------------------------------------------------------
 
         for person in tracked_people:
@@ -514,34 +801,24 @@ def process_video(
             )
 
         # --------------------------------------------------------------
-        # Global frame information
+        # GLOBAL INFO
         # --------------------------------------------------------------
 
-        info = (
-            f"Frame: "
-            f"{frame_count}/{total_frames} | "
-            f"People: "
-            f"{len(tracked_people)}"
-        )
-
-        cv2.putText(
+        _draw_frame_info(
             frame,
-            info,
-            (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2,
+            frame_count,
+            total_frames,
+            len(tracked_people),
         )
 
         # --------------------------------------------------------------
-        # Write output frame
+        # WRITE FRAME
         # --------------------------------------------------------------
 
         writer.write(frame)
 
         # --------------------------------------------------------------
-        # Progress
+        # PROGRESS
         # --------------------------------------------------------------
 
         if (
@@ -561,64 +838,220 @@ def process_video(
             )
 
     # ------------------------------------------------------------------
-    # Cleanup
+    # CLEANUP
     # ------------------------------------------------------------------
 
     capture.release()
     writer.release()
 
-    # Reset ByteTrack state after the video finishes.
     tracker.reset()
+    compliance_manager.clear()
 
     # ------------------------------------------------------------------
-    # Final statistics
+    # BUILD TRACK SUMMARIES
+    # ------------------------------------------------------------------
+
+    track_summaries = {}
+
+    for track_id in sorted(
+        track_stats.keys()
+    ):
+
+        stats = track_stats[
+            track_id
+        ]
+
+        frames_seen = (
+            stats["frames_seen"]
+        )
+
+        compliance_rate = (
+            (
+                stats["compliant_frames"]
+                / frames_seen
+                * 100.0
+            )
+            if frames_seen
+            else 0.0
+        )
+
+        average_confidence = (
+            (
+                stats["confidence_sum"]
+                / frames_seen
+            )
+            if frames_seen
+            else 0.0
+        )
+
+        track_summaries[
+            str(track_id)
+        ] = {
+            "frames_seen": frames_seen,
+
+            "compliant_frames": (
+                stats[
+                    "compliant_frames"
+                ]
+            ),
+
+            "non_compliant_frames": (
+                stats[
+                    "non_compliant_frames"
+                ]
+            ),
+
+            "compliance_rate": round(
+                compliance_rate,
+                2,
+            ),
+
+            "average_person_confidence": round(
+                average_confidence,
+                4,
+            ),
+
+            "ppe_observations": dict(
+                sorted(
+                    stats[
+                        "ppe_observations"
+                    ].items()
+                )
+            ),
+
+            "missing_observations": dict(
+                sorted(
+                    stats[
+                        "missing_observations"
+                    ].items()
+                )
+            ),
+
+            "violations": dict(
+                sorted(
+                    stats[
+                        "violations"
+                    ].items()
+                )
+            ),
+        }
+
+    # ------------------------------------------------------------------
+    # FINAL STATISTICS
     # ------------------------------------------------------------------
 
     statistics = {
         "frames_processed": frame_count,
-
-        "frames_with_people": (
-            frames_with_people
-        ),
-
+        "frames_with_people": frames_with_people,
         "unique_track_ids": sorted(
             unique_track_ids
         ),
-
         "total_unique_people": len(
             unique_track_ids
         ),
-
-        "compliant_frames": (
-            compliant_frames
-        ),
-
-        "non_compliant_frames": (
-            non_compliant_frames
-        ),
-
+        "compliant_frames": compliant_frames,
+        "non_compliant_frames": non_compliant_frames,
+        "track_summaries": track_summaries,
         "output_path": str(
             output_path.resolve()
         ),
     }
+
+    # ------------------------------------------------------------------
+    # PRINT RESULTS
+    # ------------------------------------------------------------------
 
     print()
     print("=" * 70)
     print("VIDEO PROCESSING COMPLETE")
     print("=" * 70)
 
-    for key, value in statistics.items():
+    print(
+        f"frames_processed"
+        f"{'':<9}: "
+        f"{frame_count}"
+    )
+
+    print(
+        f"frames_with_people"
+        f"{'':<7}: "
+        f"{frames_with_people}"
+    )
+
+    print(
+        f"unique_track_ids"
+        f"{'':<10}: "
+        f"{sorted(unique_track_ids)}"
+    )
+
+    print(
+        f"total_unique_people"
+        f"{'':<5}: "
+        f"{len(unique_track_ids)}"
+    )
+
+    print(
+        f"compliant_frames"
+        f"{'':<9}: "
+        f"{compliant_frames}"
+    )
+
+    print(
+        f"non_compliant_frames"
+        f"{'':<5}: "
+        f"{non_compliant_frames}"
+    )
+
+    print(
+        f"output_path"
+        f"{'':<17}: "
+        f"{output_path.resolve()}"
+    )
+
+    print()
+    print("PER-TRACK COMPLIANCE")
+    print("-" * 70)
+
+    for track_id, summary in (
+        track_summaries.items()
+    ):
 
         print(
-            f"{key:<25}: {value}"
+            f"Track {track_id}: "
+            f"frames={summary['frames_seen']} | "
+            f"compliant="
+            f"{summary['compliant_frames']} | "
+            f"non_compliant="
+            f"{summary['non_compliant_frames']} | "
+            f"rate="
+            f"{summary['compliance_rate']:.2f}%"
         )
+
+        print(
+            f"  PPE: "
+            f"{summary['ppe_observations']}"
+        )
+
+        print(
+            f"  Missing: "
+            f"{summary['missing_observations']}"
+        )
+
+        if summary["violations"]:
+
+            print(
+                f"  Violations: "
+                f"{summary['violations']}"
+            )
+
+    print()
 
     return statistics
 
 
-# ---------------------------------------------------------------------------
-# Command-line entry point
-# ---------------------------------------------------------------------------
+# ============================================================================
+# CLI
+# ============================================================================
 
 if __name__ == "__main__":
 
