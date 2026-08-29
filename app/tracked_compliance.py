@@ -1,267 +1,163 @@
-"""
-Track-aware PPE compliance.
-
-Connects:
-    PersonTracker
-        +
-    YOLO PPE detections
-        +
-    existing ppe_logic
-
-The goal is to maintain PPE compliance separately for each
-tracked person.
-
-Example:
-
-    Track ID 5
-        -> Hardhat
-        -> Gloves
-        -> NO-Goggles
-
-    Track ID 7
-        -> Hardhat
-        -> Gloves
-        -> Goggles
-
-Each person receives an independent compliance result.
-"""
-
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Dict, List
 
 from app.model_service import Detection
 from app.tracker import TrackedPerson
-from app.ppe_logic import PersonCompliance
 
+POSITIVE_TO_NEGATIVE = {
+    "Hardhat": "NO-Hardhat",
+    "Gloves": "NO-Gloves",
+    "Goggles": "NO-Goggles",
+    "Mask": "NO-Mask",
+    "Safety Vest": "NO-Safety Vest",
+}
+
+DEFAULT_REQUIRED_PPE = ["Hardhat", "Gloves", "Goggles", "Mask", "Safety Vest"]
+
+MIN_CONFIDENCE = {
+    "Hardhat": 0.10, "Gloves": 0.10, "Goggles": 0.10,
+    "Mask": 0.10, "Safety Vest": 0.10,
+    "NO-Hardhat": 0.01, "NO-Gloves": 0.01, "NO-Goggles": 0.01,
+    "NO-Mask": 0.01, "NO-Safety Vest": 0.01,
+}
+
+HISTORY_SIZE = 5
+VIOLATION_CONFIRMATIONS = 3
 
 @dataclass
 class TrackCompliance:
-    """
-    PPE compliance state associated with one tracked person.
-    """
-
     track_id: int
     person_confidence: float
-
     compliant: bool
-
-    present_ppe: List[str] = field(
-        default_factory=list
-    )
-
-    missing_ppe: List[str] = field(
-        default_factory=list
-    )
-
-    violations: List[str] = field(
-        default_factory=list
-    )
+    present_ppe: List[str] = field(default_factory=list)
+    missing_ppe: List[str] = field(default_factory=list)
+    violations: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "track_id": self.track_id,
-            "person_confidence": round(
-                self.person_confidence,
-                4,
-            ),
+            "person_confidence": round(self.person_confidence, 4),
             "compliant": self.compliant,
             "present_ppe": self.present_ppe,
             "missing_ppe": self.missing_ppe,
             "violations": self.violations,
         }
 
-
 class TrackComplianceManager:
-    """
-    Maintains PPE compliance for multiple tracked people.
+    """Convert per-person PPE detections into track-specific compliance."""
 
-    The manager does not implement new PPE rules.
-
-    It reuses the existing PPE decision layer and associates
-    detections with individual tracked person bounding boxes.
-    """
-
-    def __init__(
-        self,
-        required_ppe_classes: List[str] | None = None,
-    ):
+    def __init__(self, required_ppe_classes: List[str] | None = None):
         self.required_ppe_classes = (
-            required_ppe_classes
+            list(required_ppe_classes)
+            if required_ppe_classes is not None
+            else list(DEFAULT_REQUIRED_PPE)
+        )
+        self.states: Dict[int, TrackCompliance] = {}
+        self._negative_history: Dict[int, Dict[str, deque[bool]]] = defaultdict(
+            lambda: defaultdict(lambda: deque(maxlen=HISTORY_SIZE))
         )
 
-        self.states: Dict[
-            int,
-            TrackCompliance,
-        ] = {}
+    def _evaluate(self, track_id: int, detections: List[Detection]):
+        best: Dict[str, Detection] = {}
+        for detection in detections:
+            name = detection.class_name
+            threshold = MIN_CONFIDENCE.get(name)
+            if threshold is None or detection.confidence < threshold:
+                continue
+            previous = best.get(name)
+            if previous is None or detection.confidence > previous.confidence:
+                best[name] = detection
 
-    def update(
-        self,
-        tracked_people: List[TrackedPerson],
-        detections: List[Detection],
-    ) -> List[TrackCompliance]:
-        """
-        Calculate compliance for every currently tracked person.
+        present, missing, violations = [], [], []
+        for required in self.required_ppe_classes:
+            negative = POSITIVE_TO_NEGATIVE.get(required)
+            positive_detection = best.get(required)
+            negative_detection = best.get(negative) if negative else None
 
-        PPE detections are restricted to each person's bounding box
-        before passing them through the existing PPE decision logic.
-        """
+            if negative:
+                self._negative_history[track_id][negative].append(
+                    negative_detection is not None
+                )
+                history = self._negative_history[track_id][negative]
+            else:
+                history = deque()
 
+            confirmed_negative = (
+                negative is not None
+                and sum(history) >= VIOLATION_CONFIRMATIONS
+            )
+
+            if confirmed_negative:
+                missing.append(required)
+                violations.append(f"violation_{required}")
+            elif positive_detection is not None:
+                present.append(required)
+            else:
+                missing.append(required)
+                violations.append(f"missing_{required}")
+
+        return present, missing, violations
+
+    @staticmethod
+    def _assignment_score(person_box: List[float], detection_box: List[float]) -> float:
+        px1, py1, px2, py2 = person_box
+        dx1, dy1, dx2, dy2 = detection_box
+        dcx, dcy = (dx1 + dx2) / 2.0, (dy1 + dy2) / 2.0
+        if px1 <= dcx <= px2 and py1 <= dcy <= py2:
+            return 1.0
+
+        ix1, iy1 = max(px1, dx1), max(py1, dy1)
+        ix2, iy2 = min(px2, dx2), min(py2, dy2)
+        intersection = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        person_area = max(0.0, px2 - px1) * max(0.0, py2 - py1)
+        detection_area = max(0.0, dx2 - dx1) * max(0.0, dy2 - dy1)
+        union = person_area + detection_area - intersection
+        return intersection / union if union > 0 else 0.0
+
+    def update(self, tracked_people: List[TrackedPerson], detections: List[Detection]) -> List[TrackCompliance]:
         results: List[TrackCompliance] = []
+        per_track: Dict[int, List[Detection]] = {p.track_id: [] for p in tracked_people}
+
+        for detection in detections:
+            if not detection.box_xyxy:
+                continue
+            best_person, best_score = None, 0.0
+            for person in tracked_people:
+                score = self._assignment_score(person.box_xyxy, detection.box_xyxy)
+                if score > best_score:
+                    best_score, best_person = score, person
+            if best_person is not None and best_score > 0.0:
+                per_track[best_person.track_id].append(detection)
+
+        active_ids = {p.track_id for p in tracked_people}
+        for track_id in list(self._negative_history):
+            if track_id not in active_ids:
+                del self._negative_history[track_id]
 
         for person in tracked_people:
-
-            person_detection = Detection(
-                class_id=-1,
-                class_name="Person",
-                confidence=person.confidence,
-                box_xyxy=person.box_xyxy,
+            present, missing, violations = self._evaluate(
+                person.track_id, per_track.get(person.track_id, [])
             )
-
-            # ----------------------------------------------------------
-            # Find detections associated with this person.
-            #
-            # Keep the Person detection plus PPE detections whose
-            # bounding boxes belong to this tracked person.
-            # ----------------------------------------------------------
-
-            associated_detections = [
-                person_detection
-            ]
-
-            for detection in detections:
-
-                if detection.class_name == "Person":
-                    continue
-
-                if self._is_inside_person(
-                    person.box_xyxy,
-                    detection.box_xyxy,
-                ):
-                    associated_detections.append(
-                        detection
-                    )
-
-            # ----------------------------------------------------------
-            # Use the existing PPE decision layer.
-            # ----------------------------------------------------------
-
-            from app.ppe_logic import evaluate_compliance
-
-            compliance = evaluate_compliance(
-                associated_detections,
-                person_class_names=["Person"],
-                required_ppe_classes=(
-                    self.required_ppe_classes
-                ),
-            )
-
-            # ----------------------------------------------------------
-            # Extract this person's result.
-            # ----------------------------------------------------------
-
-            if compliance.people:
-
-                person_result = compliance.people[0]
-
-            else:
-
-                person_result = PersonCompliance(
-                    person_index=0,
-                    person_confidence=person.confidence,
-                    compliant=False,
-                    missing_ppe=(
-                        self.required_ppe_classes
-                        or []
-                    ),
-                    violations=[
-                        f"missing_{ppe}"
-                        for ppe in (
-                            self.required_ppe_classes
-                            or []
-                        )
-                    ],
-                )
-
             state = TrackCompliance(
                 track_id=person.track_id,
                 person_confidence=person.confidence,
-                compliant=person_result.compliant,
-                present_ppe=list(
-                    person_result.present_ppe
-                ),
-                missing_ppe=list(
-                    person_result.missing_ppe
-                ),
-                violations=list(
-                    person_result.violations
-                ),
+                compliant=(not missing and not violations),
+                present_ppe=present,
+                missing_ppe=missing,
+                violations=violations,
             )
-
-            # ----------------------------------------------------------
-            # Store state by persistent track ID.
-            # ----------------------------------------------------------
-
-            self.states[
-                person.track_id
-            ] = state
-
+            self.states[person.track_id] = state
             results.append(state)
 
-        # Remove tracks that are no longer active.
-        active_ids = {
-            person.track_id
-            for person in tracked_people
-        }
-
-        self.states = {
-            track_id: state
-            for track_id, state in self.states.items()
-            if track_id in active_ids
-        }
-
+        self.states = {k: v for k, v in self.states.items() if k in active_ids}
         return results
 
-    @staticmethod
-    def _is_inside_person(
-        person_box: List[float],
-        detection_box: List[float],
-    ) -> bool:
-        """
-        Determine whether a detection belongs to a person.
-
-        A detection is associated when its center point lies
-        inside the person's bounding box.
-        """
-
-        px1, py1, px2, py2 = person_box
-
-        dx1, dy1, dx2, dy2 = detection_box
-
-        center_x = (
-            dx1 + dx2
-        ) / 2.0
-
-        center_y = (
-            dy1 + dy2
-        ) / 2.0
-
-        return (
-            px1 <= center_x <= px2
-            and
-            py1 <= center_y <= py2
-        )
-
-    def get(
-        self,
-        track_id: int,
-    ) -> TrackCompliance | None:
-        """Return the latest state for a tracked person."""
-
+    def get(self, track_id: int) -> TrackCompliance | None:
         return self.states.get(track_id)
 
     def clear(self) -> None:
-        """Clear all tracked compliance state."""
-
         self.states.clear()
+        self._negative_history.clear()
