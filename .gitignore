@@ -60,6 +60,7 @@ Thumbs.db
 # --- Local test media ---
 data/*.mp4
 data/*.jpg
+
 data/output/
 
 # --- Backup files ---
